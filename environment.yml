@@ -1,0 +1,15 @@
+name: nebius-image-sdg
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  # - numpy
+  # - pandas>=2.0
+  # - matplotlib
+  # - scikit-learn
+  # - jupyterlab
+  - pip
+  - pip:
+      - boto3
+      - python-dotenv
+      - jupyterlab
