@@ -1,0 +1,32 @@
+{
+  "accept_nvidia_eula": true,
+  "generator": {
+    "rt_subframes": 8,
+    "seed": 0,
+    "overrides": {}
+  },
+  "validate": true,
+  "cache": {
+    "root": null
+  },
+  "upload": {
+    "enabled": true,
+    "bucket": "${SDG_BUCKET}",
+    "prefix": "isaac-sim-blend/replicator",
+    "endpoint_url": "${SDG_S3_ENDPOINT}",
+    "region": "${SDG_S3_REGION}",
+    "access_key_env": "NEBIUS_S3_ACCESS_KEY_ID",
+    "secret_key_env": "NEBIUS_S3_SECRET_ACCESS_KEY",
+    "overwrite": false
+  },
+  "job": {
+    "image": "nvcr.io/nvidia/isaac-sim@sha256:c2f47dc82a7714af08d3766efe80ac9d084c2b37b5d0dfbd074797ec56390fc7",
+    "platform": "gpu-rtx6000",
+    "preset": "1gpu-24vcpu-218gb",
+    "disk_size": "100Gi",
+    "timeout": "1h",
+    "secret": "${SDG_SECRET:-sdg-s3}",
+    "subnet_id": "${NEBIUS_SUBNET_ID:-}",
+    "cache_volume": "${SDG_CACHE_VOLUME:-}"
+  }
+}
