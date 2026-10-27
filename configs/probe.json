@@ -1,9 +1,6 @@
 {
   "extends": "common.json",
   "run_name": "probe",
-  "description": "No generator: checks GPU, Vulkan, network and bucket access from inside a job, then renders one frame.",
-  "probe": true,
-  "generator": {
-    "num_frames": 0
-  }
+  "description": "No generator: checks GPU, Vulkan, caches, network and bucket from inside a job, then renders each anti-aliasing mode.",
+  "probe": true
 }

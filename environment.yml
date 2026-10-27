@@ -6,5 +6,8 @@ dependencies:
   - pip
   - pip:
       - boto3
+      - numpy
+      - pillow
       - python-dotenv
       - jupyterlab
+      - pytest
