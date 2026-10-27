@@ -1,0 +1,5 @@
+[PASS] rendered 2 image(s), pixel std 38.8
+dlss_performance  std  38.8  edge   0.8
+dlss_quality      std  39.1  edge   1.0
+dlaa              std  38.9  edge   1.2
+no_aa             std  39.3  edge   1.0

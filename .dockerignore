@@ -1,0 +1,8 @@
+# Allowlist: only the code the Dockerfile copies. Keeps .env, runs/ and the
+# notebooks out of the build context.
+*
+!run_sdg.py
+!constants.py
+!sdg/generate_replicator.py
+!sdg/check_validation.py
+!nebius/job_entry.sh
