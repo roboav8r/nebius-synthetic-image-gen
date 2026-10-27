@@ -1,6 +1,6 @@
 """Generate our own Replicator SDG under two camera regimes.
 
-Runs *inside* the Isaac Sim 4.5 container (`./python.sh`), so it cannot
+Runs *inside* the Isaac Sim 6.1 container (`./python.sh`), so it cannot
 import anything from the project env -- every constant it needs is
 duplicated in CONFIG below and kept in sync with `constants.py` by hand.
 
@@ -110,13 +110,29 @@ import omni.usd  # noqa: E402
 from isaacsim.core.utils import prims  # noqa: E402
 from isaacsim.core.utils.rotations import euler_angles_to_quat  # noqa: E402
 from isaacsim.core.utils.semantics import (  # noqa: E402
-    add_update_semantics,
-    get_semantics,
-    remove_all_semantics,
+    add_labels,
+    get_labels,
+    remove_labels,
+    upgrade_prim_semantics_to_labels,
 )
 from isaacsim.core.utils.stage import get_current_stage, open_stage  # noqa: E402
 from isaacsim.storage.native import get_assets_root_path  # noqa: E402
 from pxr import Gf, Usd, UsdGeom, UsdLux  # noqa: E402
+
+# Units are corrected exactly once, by `unit_scale()` below. Isaac Sim 6.1's
+# metrics assembler also corrects them on its own, adding an
+# `xformOp:scale:unitsResolve` op -- but only to some assets, and not
+# always in time: in the 6.1 container Forklift_A came out 0.02 m long with
+# both corrections applied, while the HeavyDuty pallet truck was fine. Turn
+# it off so one mechanism owns the units, as in 4.5.
+_settings = carb.settings.get_settings()
+_settings.set("/metricsAssembler/operationMode", 0)
+
+# Renderer settings from the run config, e.g. the anti-aliasing mode. Kit's
+# default is DLSS Performance, which renders at half resolution.
+for _k, _v in CONFIG.get("rtx_settings", {}).items():
+    _settings.set(_k, _v)
+    print(f"[sdg] {_k} = {_settings.get(_k)}")
 
 random.seed(CONFIG["seed"])
 rep.set_global_seed(CONFIG["seed"])
@@ -126,7 +142,7 @@ if ROOT is None:
     carb.log_error("no assets root; closing")
     simulation_app.close()
 
-# `get_assets_root_path()` returns `<...>/Assets/Isaac/4.5`, but only the
+# `get_assets_root_path()` returns `<...>/Assets/Isaac/6.1`, but only the
 # Isaac library lives under that. The SimReady and DigitalTwin collections
 # are siblings one level up, under `<...>/Assets`. Resolving everything
 # against ROOT silently produces 404s (and then a segfault, because
@@ -355,24 +371,26 @@ def apply_semantics():
 
     Clearing recursively after the fact, then re-applying only our three
     classes to the object roots, is the order that actually holds.
+
+    Isaac Sim 6.1 labels with `UsdSemantics.LabelsAPI`; assets authored with
+    the older `SemanticsAPI` are converted first, so clearing catches both.
     """
     for label, paths in SPAWNED.items():
         for path in paths:
             prim = stage.GetPrimAtPath(path)
             if not prim or not prim.IsValid():
                 continue
-            remove_all_semantics(prim, True)
+            upgrade_prim_semantics_to_labels(prim, include_descendants=True)
+            remove_labels(prim, include_descendants=True)
             if label in TARGET_CLASSES:
-                add_update_semantics(prim, semantic_label=label, type_label="class")
+                add_labels(prim, labels=[label], instance_name="class")
 
 
 def semantic_vocabulary():
     """Every distinct semantic label left on the stage."""
     vocab = set()
     for prim in stage.Traverse():
-        for _, (stype, sdata) in (get_semantics(prim) or {}).items():
-            if stype == "class":
-                vocab.add(sdata)
+        vocab.update(get_labels(prim).get("class", []))
     return vocab
 
 
@@ -423,7 +441,7 @@ apply_semantics()
 # The stage vocabulary cannot be reduced to our three classes by clearing
 # semantics, because the warehouse props and the referenced assets are
 # **instanceable**: their semantics live in instance prototypes, and USD does
-# not let you author an override onto an instance proxy. `remove_all_semantics`
+# not let you author an override onto an instance proxy. `remove_labels`
 # silently no-ops there. The first Round 8 validation attempt aborted on
 # exactly this -- 27 labels survived, including `floor`, `ceiling`, `wall`,
 # `rack` and `prop_general`.
@@ -642,6 +660,30 @@ writer.initialize(
         "forklift": [255, 140, 0, 255],
     },
 )
+# Since Kit 109, Replicator gives every annotator created without an explicit
+# filter `semanticFilter="*:*"`, which overrides the writer's global
+# predicate above. KittiWriter lists its box and segmentation annotators that
+# way, so on 6.1 the first naive_20 run labelled `box`, `rack`, `floor` and
+# `wall` again. Recreate them with the predicate passed explicitly.
+_PREDICATE = "class: " + " | ".join(TARGET_CLASSES)
+_FILTERED = {
+    "bounding_box_2d_tight_fast": {},
+    "bounding_box_2d_loose_fast": {},
+    "semantic_segmentation": {"mapping": writer._get_anno_semantic_mapping()},
+    "instance_segmentation_fast": {"colorize": False},
+}
+
+
+def _name(a):
+    return a if isinstance(a, str) else a.get_name()
+
+
+writer.annotators = [
+    rep.AnnotatorRegistry.get_annotator(
+        _name(a), init_params={**_FILTERED[_name(a)], "semanticFilter": _PREDICATE})
+    if _name(a) in _FILTERED else a
+    for a in writer.annotators
+]
 writer.attach(rps)
 
 # Camera pose, driven from our own RNG in the frame loop rather than by
@@ -656,24 +698,19 @@ CAM_XFORMS = {
 
 
 def _look_at_quat(eye, target, quat, up=(0.0, 0.0, 1.0)):
-    """Orientation that aims a Replicator camera at `target`.
+    """Orientation for a Replicator camera's `_Xform` that aims it at `target`.
 
     **Measured against Replicator's own `rep.modify.pose(look_at=...)`, not
-    assumed.** USD documents a camera as looking down local -Z with +Y up;
-    building that basis aims these cameras at the ceiling, and so does a
-    +Y-forward basis, which is why two textbook implementations produced
-    byte-identical wrong output and looked like a maths error.
+    assumed** -- and the answer changed between versions:
 
-    Capturing the world matrix Replicator itself produces for a known mount
-    and decoding it against the aim box gives the actual convention:
-
-        row0 = -forward     (local +X points *backward*)
-        row1 = right
-        row2 = up
-
-    Checked on three frames from both regimes: `-row0` lands inside the aim
-    box every time, and `row2` is exactly world up projected perpendicular
-    to the view axis.
+    - Isaac Sim 6.1 (Replicator 1.13): `rep.create.camera` makes an `_Xform`
+      with the Camera as an identity child, so the Xform follows the USD camera
+      convention: it looks down local -Z, with +Y up. Replicator aiming from
+      (0, 0, 1.5) at (5, 0, 1) wrote `rotateXYZ = (84.29, 0, -90)`, which maps
+      -Z onto that direction. Rows: right, up, -forward.
+    - Isaac Sim 4.5 needed rows (-forward, right, up). On 6.1 that basis maps -Z
+      to -up, so the first 6.1 naive_20 run had every camera staring at the
+      floor.
     """
     e = Gf.Vec3d(*eye)
     fwd = Gf.Vec3d(*target) - e
@@ -684,10 +721,10 @@ def _look_at_quat(eye, target, quat, up=(0.0, 0.0, 1.0)):
     if abs(Gf.Dot(fwd, u)) > 0.999:          # looking straight up or down
         u = Gf.Vec3d(0.0, 1.0, 0.0)
     right = Gf.Cross(fwd, u).GetNormalized()
-    upv = -Gf.Cross(fwd, right)
-    m = Gf.Matrix3d(-fwd[0], -fwd[1], -fwd[2],
-                    right[0], right[1], right[2],
-                    upv[0], upv[1], upv[2])
+    upv = Gf.Cross(right, fwd)
+    m = Gf.Matrix3d(right[0], right[1], right[2],
+                    upv[0], upv[1], upv[2],
+                    -fwd[0], -fwd[1], -fwd[2])
     q = m.ExtractRotation().GetQuat()
     im = q.GetImaginary()
     return quat(float(q.GetReal()), float(im[0]), float(im[1]), float(im[2]))

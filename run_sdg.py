@@ -48,18 +48,21 @@ HERE = Path(__file__).resolve().parent
 GENERATOR = HERE / "sdg" / "generate_replicator.py"
 VALIDATOR = HERE / "sdg" / "check_validation.py"
 
-# The 8 paths `sdg/run_sdg_local_reference.sh` mounts. Together they take a
-# cold start from 336 s to 19.5 s. Container layout; the pip install keeps
-# its kit cache inside site-packages and is left alone.
+# Isaac's on-disk caches. Together they took a 4.5 cold start from 336 s to
+# 19.5 s. Container layout: kit/cache is created at runtime, and the rest
+# follows HOME (/root as the job image runs it; /isaac-sim for the stock
+# image's own user). The pip install keeps its kit cache inside
+# site-packages and is left alone.
+_HOME = Path.home()
 CACHE_PATHS = {
     "kit": "/isaac-sim/kit/cache",
-    "ov": "/root/.cache/ov",
-    "pip": "/root/.cache/pip",
-    "glcache": "/root/.cache/nvidia/GLCache",
-    "computecache": "/root/.nv/ComputeCache",
-    "logs": "/root/.nvidia-omniverse/logs",
-    "data": "/root/.local/share/ov/data",
-    "documents": "/root/Documents",
+    "ov": str(_HOME / ".cache/ov"),
+    "pip": str(_HOME / ".cache/pip"),
+    "glcache": str(_HOME / ".cache/nvidia/GLCache"),
+    "computecache": str(_HOME / ".nv/ComputeCache"),
+    "logs": str(_HOME / ".nvidia-omniverse/logs"),
+    "data": str(_HOME / ".local/share/ov/data"),
+    "documents": str(_HOME / "Documents"),
 }
 
 # Generator log lines that bracket the render loop, used for timing.

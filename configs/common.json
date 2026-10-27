@@ -3,7 +3,9 @@
   "generator": {
     "rt_subframes": 8,
     "seed": 0,
-    "overrides": {}
+    "overrides": {
+      "rtx_settings": {"/rtx/post/aa/op": 4}
+    }
   },
   "validate": true,
   "cache": {
@@ -20,13 +22,13 @@
     "overwrite": false
   },
   "job": {
-    "image": "nvcr.io/nvidia/isaac-sim@sha256:c2f47dc82a7714af08d3766efe80ac9d084c2b37b5d0dfbd074797ec56390fc7",
+    "registry": "${SDG_REGISTRY}",
     "platform": "gpu-rtx6000",
     "preset": "1gpu-24vcpu-218gb",
     "disk_size": "100Gi",
     "timeout": "1h",
     "secret": "${SDG_SECRET:-sdg-s3}",
     "subnet_id": "${NEBIUS_SUBNET_ID:-}",
-    "cache_volume": "${SDG_CACHE_VOLUME:-}"
+    "shared_fs": "${SDG_SHARED_FS}"
   }
 }

@@ -24,7 +24,8 @@ from run_sdg import load_config, remote_prefix, s3_client  # noqa: E402
 
 GATE_LINE = re.compile(r"^\s*\[(PASS|FAIL)\]|^===|^GATE")
 ENV_NEEDED = ("SDG_BUCKET", "SDG_S3_ENDPOINT", "SDG_S3_REGION",
-              "NEBIUS_S3_ACCESS_KEY_ID", "NEBIUS_S3_SECRET_ACCESS_KEY")
+              "NEBIUS_S3_ACCESS_KEY_ID", "NEBIUS_S3_SECRET_ACCESS_KEY", "SDG_SHARED_FS",
+              "SDG_REGISTRY")
 
 
 # --- 0. local checks -------------------------------------------------------
@@ -40,8 +41,23 @@ def local_check() -> bool:
                            capture_output=True, text=True)
         checks.append(("CLI profile can list jobs", r.returncode == 0,
                        "" if r.returncode == 0 else r.stderr.strip().splitlines()[-1][:120]))
+    docker = shutil.which("docker")
+    ok = bool(docker) and subprocess.run(["docker", "info"], capture_output=True).returncode == 0
+    checks.append(("docker daemon reachable", ok, "" if ok else "needed to build the job image"))
     for k in ENV_NEEDED:
         checks.append((f"{k} set", bool(os.environ.get(k)), ""))
+    if os.environ.get("SDG_REGISTRY"):
+        host = os.environ["SDG_REGISTRY"].split("/")[0]
+        cfg_file = Path.home() / ".docker" / "config.json"
+        helpers = json.loads(cfg_file.read_text()).get("credHelpers", {}) if cfg_file.exists() else {}
+        checks.append(("docker can push to the registry", host in helpers,
+                       "" if host in helpers else "run: nebius registry configure-helper"))
+    if cli and os.environ.get("SDG_SHARED_FS"):
+        r = subprocess.run(["nebius", "compute", "filesystem", "get", os.environ["SDG_SHARED_FS"],
+                            "--format", "json"], capture_output=True, text=True)
+        checks.append(("shared filesystem exists", r.returncode == 0,
+                       os.environ["SDG_SHARED_FS"] if r.returncode == 0
+                       else (r.stderr.strip().splitlines() or ["?"])[-1][:120]))
     if all(os.environ.get(k) for k in ENV_NEEDED):
         try:
             cfg = load_config(HERE / "configs" / "common.json")
@@ -84,6 +100,32 @@ def fetch_run(config: str, include_frames: bool = True) -> Path:
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(get, rel))
     print(f"fetched {len(rel)} files from s3://{bucket}/{prefix}/ to {dest}")
+    return dest
+
+
+def probe_frames(job_name: str) -> Path:
+    """Download a probe job's frames (one per anti-aliasing mode) from
+    `probe/<job_name>/` and show them with their scores. Pass the job's name,
+    e.g. `nj.last_job("probe")["name"]`."""
+    from IPython.display import Image, display
+
+    cfg = load_config(HERE / "configs" / "common.json")
+    client = s3_client(cfg)
+    bucket, prefix = cfg["upload"]["bucket"], f"probe/{job_name}"
+    dest = HERE / "runs" / "probe" / job_name
+    keys = [o["Key"] for page in client.get_paginator("list_objects_v2").paginate(
+        Bucket=bucket, Prefix=prefix + "/") for o in page.get("Contents", [])]
+    if not keys:
+        raise FileNotFoundError(f"nothing at s3://{bucket}/{prefix}/ -- did the probe finish?")
+    for k in keys:
+        (dest / k[len(prefix) + 1:]).parent.mkdir(parents=True, exist_ok=True)
+        client.download_file(bucket, k, str(dest / k[len(prefix) + 1:]))
+    if (dest / "result.txt").exists():
+        print((dest / "result.txt").read_text())
+    for mode in sorted(p for p in dest.iterdir() if p.is_dir()):
+        last = sorted(mode.glob("*.png"))[-1]
+        print(mode.name)
+        display(Image(filename=str(last), width=960))
     return dest
 
 

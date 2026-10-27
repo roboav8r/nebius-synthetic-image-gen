@@ -3,6 +3,7 @@
   "run_name": "naive_20",
   "description": "First attempt at stock-example density: a handful of objects, so most frames are near-empty. The gate should catch it.",
   "expect_gate": "fail",
+  "upload": {"overwrite": true},
   "generator": {
     "num_frames": 20,
     "overrides": {

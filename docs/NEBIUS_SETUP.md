@@ -34,6 +34,8 @@ Note: Your user needs the `editor` role in the project (the default `editors` gr
 ## 2. Check GPU quota
 In the [console quotas page](https://console.nebius.com/quota), Compute section, check that the project can run at least one **L40s** or **RTX PRO 6000** GPU VM in the project's region (`compute.instance.gpu.l40s` or `compute.instance.gpu.rtx6000` > 0). Raise the quota if not.
 
+The jobs run Isaac Sim 6.1. NVIDIA tested 6.1 on Linux driver 595.58.03; Nebius's GPU workers report 580.173.02, so check `nvidia-smi` in the probe log if a new release misbehaves. Nebius's own [Isaac Sim example](https://github.com/nebius/serverless-ai-cookbook/tree/main/robotics/isaac-pick-place-sweep) runs 6.1 on that 580 driver.
+
 ## 3. Create the bucket
 Create it in the console (**Storage → Object Storage → Create bucket**) or with `nebius storage bucket create --name <bucket>`. On the bucket's page, note:
 - the **region**, such as `eu-north1` or `us-central1`
@@ -69,15 +71,33 @@ print(json.dumps([{"key": k, "string_value": os.environ[k]}
 ```
 See [creating secrets](https://docs.nebius.com/mysterybox/secrets/create). To rotate the key later, add a new version to the same secret. The jobs pick up the latest version.
 
-## 7. Optional: a shared filesystem for Isaac's caches
-Each job starts on a fresh VM, so Isaac Sim starts cold every time: shader compilation, asset downloads, roughly 5–6 min. A shared filesystem mounted at `/cache` keeps those caches between jobs. Locally, the same caches took startup from 336 s to 19.5 s.
-1. Create a filesystem (**Compute → Shared filesystems**, about 50 GiB is plenty) in the same region.
-2. Put its ID (`computefilesystem-…`) in `SDG_CACHE_VOLUME` in `.env`.
+## 7. Create a Container Registry for the job image
+The jobs run our own image: NVIDIA's Isaac Sim 6.1 image with this repo's code copied in (see `Dockerfile`). It is built locally with Docker and pushed to a [Container Registry](https://docs.nebius.com/container-registry/quickstart) in your project. The registry is free; you pay only for the storage.
+1. Install Docker with the NVIDIA container runtime (needed only to build the image, and to test it locally).
+2. Create the registry in the **same region** as the jobs:
+   ```bash
+   nebius registry create --name sdg --parent-id <project-id>
+   nebius registry configure-helper    # lets `docker push` use your Nebius login
+   ```
+3. Put the registry path from its console page, `cr.<region>.nebius.cloud/<registry-id>`, in `SDG_REGISTRY` in `.env`.
 
-The launcher then adds `--volume <id>:/cache:rw` and `SDG_CACHE_ROOT=/cache`, and `run_sdg.py` links Isaac's cache directories into it.
+### How code reaches the job
+All of a job's `--inject-file` contents share a 64 KiB limit, and the code is larger than that, so it goes into the image:
+1. `nj.build()` tags the image with a hash of the code and the Dockerfile (`IMAGE_FILES` in `nebius_job.py`), then runs `docker build` and `docker push`. Both are quick when nothing changed. The first push uploads the ~11 GB Isaac base layers once.
+2. `nj.launch()` calls `nj.build()` itself, so a code change is picked up automatically.
+3. The configs are small, so they are injected into each job at `/workspace/configs/`. Editing a config does not need a new image.
 
-## 8. Optional: subnet
+## 8. Create the shared filesystem for Isaac's caches
+Every job mounts one shared filesystem at `/shared`, which holds Isaac Sim's caches at `/shared/cache-6.1/`. Each job starts on a fresh VM, so without these, Isaac starts cold every time: shader compilation and asset downloads take roughly 5–6 min. Locally, the same caches took startup from 336 s to 19.5 s.
+
+To set it up:
+1. Create a filesystem (**Compute → Shared filesystems**, about 50 GiB is plenty) in the **same region** as the jobs, or with `nebius compute filesystem create --name sdg-shared --type network_ssd --size-gibibytes 50`.
+2. Put its ID (`computefilesystem-…`) in `SDG_SHARED_FS` in `.env`.
+
+The launcher adds `--volume <id>:/shared:rw` and `SDG_CACHE_ROOT=/shared/cache-6.1` to every job, and `run_sdg.py` links Isaac's cache directories into it. The job image runs as root: the stock image's non-root `isaac-sim` user cannot write to the shared filesystem, even to a directory it owns.
+
+## 9. Optional: subnet
 If the project has more than one subnet, set `NEBIUS_SUBNET_ID` in `.env`. Otherwise jobs use the default subnet.
 
 ## Done
-Open `nebius_synthetic_image_gen.ipynb`. Section 0 checks all of the above (the CLI, `.env`, and bucket access with your keys). Section 2 runs the probe job, which checks the job side: GPU, Vulkan, network, the MysteryBox keys, and a one-frame render.
+Open `nebius_synthetic_image_gen.ipynb`. Section 0 checks all of the above (the CLI, Docker and its registry login, `.env`, that the shared filesystem exists, and bucket access with your keys). Section 2 builds and pushes the image and runs the probe job, which checks the job side: GPU, Vulkan, the shared filesystem mount, network, the MysteryBox keys, and a render under four anti-aliasing modes. The probe uploads those frames to `s3://<bucket>/probe/<job-name>/` for comparison. The first probe is a cold start of about 6 minutes. It also warms Isaac's caches on the shared filesystem, so later probes and runs start much faster.

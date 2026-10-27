@@ -111,6 +111,8 @@ GCS_PREFIX = "gs://voxel51-test/datasets/isaac-sim-blend"
 #
 # Read off `KittiWriter.__init__` in the 4.5.0 container
 # (omni.replicator.core-1.11.35), not off the docs, which do not state these.
+# Re-read in the 6.1.0 container (omni.replicator.core-1.13.36): the
+# signature and all three defaults below are unchanged.
 # Three of its defaults are measurement decisions we would otherwise inherit
 # silently:
 #
