@@ -1,6 +1,6 @@
 # Lessons-learned image archive
 
-Frames kept for the blog post. Each folder is one lesson. The originals were overwritten by later runs, so these copies are the only ones left.
+Frames kept for the blog post. Each folder is one lesson from [`docs/LESSONS.md`](../../LESSONS.md). The originals were overwritten by later runs, so these copies are the only ones left.
 
 `edge` is the mean absolute difference between horizontally adjacent pixels (greyscale): about 1–2 for a clean frame, 14–19 for the speckled ones.
 
@@ -45,11 +45,4 @@ Frames kept for the blog post. Each folder is one lesson. The originals were ove
 - **Bottom row (elevated):** upright views looking down at the scatter area.
 - **Labels:** `pallet` 17, `forklift` 2, `pallet_truck` 1.
 
-## Other lessons from the same migration (no images)
-- **Invisible result line:** `SimulationApp.close()` ends the process without flushing Python's stdout. When stdout went to a file, the probe's PASS line was lost, so a successful render reported FAIL.
-- **Double unit correction:** 6.1's metrics assembler applied its own correction to centimetre assets on top of ours. One forklift came out 0.02 m long, and the scale check caught it.
-- **Label leak:** Kit 109+ gives each annotator a `*:*` semantic filter, which overrode the writer's filter, so `box`, `rack`, `floor` and `wall` were labelled.
-- **Shared filesystem permissions:** the Nebius shared filesystem refused writes from the image's non-root user, even to a directory chowned to that user.
-- **Upload size limit:** all of a job's `--inject-file` contents share a 64 KiB limit.
-
-All of these are also in `CLAUDE.md` under "Lessons".
+The lessons themselves, with the rest from the migration, are in [`docs/LESSONS.md`](../../LESSONS.md).

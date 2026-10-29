@@ -1,31 +1,25 @@
 #!/usr/bin/env python
-"""Launch an SDG run as a Nebius serverless job, from a run config.
+"""Build the job image and launch a run config as a Nebius serverless job.
 
-    python nebius_job.py --config configs/naive_20.json --dry-run   # print the commands
-    python nebius_job.py --config configs/naive_20.json --wait      # build, launch and follow
+    python nebius_job.py --check                                  # is this machine ready?
+    python nebius_job.py --config configs/naive_20.json --dry-run # print what would run
+    python nebius_job.py --config configs/naive_20.json --wait    # build, launch, follow
 
-    python nebius_job.py --config configs/probe.json --build        # only build and push the image
+In a notebook: `import nebius_job as nj`, then `nj.check()`, `nj.build(...)`,
+`nj.launch(...)`, `nj.wait(...)`, `nj.logs(...)`.
 
-The run config's `job` block is the job spec: base image, registry, platform,
-preset, disk, timeout, the MysteryBox secret holding the S3 keys, the shared
-filesystem, and an optional subnet. This turns it into one `nebius ai job
-create` command.
+How a job is put together:
+- Image: the Dockerfile, which is Isaac Sim 6.1 plus the `sdg/` package,
+  tagged with a hash of those files, so only a code change makes a new tag.
+- Config: resolved here, where `.env` is, and injected as one file at
+  /workspace/config.json. Injected files are limited to 64 KiB per job.
+- Caches: a shared filesystem mounted at /shared keeps Isaac's caches warm
+  between jobs.
+- S3 keys: read in the job from a MysteryBox secret with `--env-secret`, so
+  their values never appear on a command line or in the job spec.
 
-- **Image:** NVIDIA's digest-pinned Isaac Sim 6.1 image with this repo's code
-  copied in (see Dockerfile), pushed to a Nebius Container Registry. It is
-  tagged with a hash of the code, so only a code change makes a new tag.
-- **Configs:** small, so injected into every job at /workspace/configs. All of
-  a job's injected files share a 64 KiB limit; the code would not fit, which is
-  why it is in the image.
-- **Caches:** Isaac's caches live on the shared filesystem, at /shared/cache-6.1.
-  The image runs as root: the base image's non-root user cannot write there.
-- **Bucket details:** passed in with `--env`.
-- **S3 keys:** referenced by secret name with `--env-secret`, so their values never
-  appear on this machine's command line or in the job spec.
-
-Every launch is recorded in runs/jobs.json, so `wait()` and `logs()` can pick a
-job back up by run name after a kernel restart. Image pushes are recorded under
-`_build`.
+Every launch is recorded in runs/jobs.json, so `last_job(run_name)` can pick
+a job back up after a kernel restart.
 """
 
 from __future__ import annotations
@@ -42,220 +36,121 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from run_sdg import load_config
+from sdg import storage
+from sdg.config import load_config
 
-HERE = Path(__file__).resolve().parent
-JOBS_FILE = HERE / "runs" / "jobs.json"
-CONTAINER_ROOT = "/workspace"
-MAX_INJECT_BYTES = 64 * 1024
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
-
-# What goes into the image; the Dockerfile copies exactly these. Their hash,
-# with the Dockerfile's, is the image tag.
-CODE_FILES = [
-    "run_sdg.py",
-    "constants.py",
-    "sdg/generate_replicator.py",
-    "sdg/check_validation.py",
-    "nebius/job_entry.sh",
-]
-IMAGE_FILES = CODE_FILES + ["Dockerfile", ".dockerignore"]
+ROOT = Path(__file__).resolve().parent
+RUNS = ROOT / "runs"
+JOBS_FILE = RUNS / "jobs.json"
 IMAGE_NAME = "sdg"
-# Bucket details the configs reference as ${VAR}; forwarded to the job as-is.
-FORWARD_ENV = ["SDG_BUCKET", "SDG_S3_ENDPOINT", "SDG_S3_REGION"]
-JOB_WORK_DIR = "/tmp/sdg_runs"  # on the container disk, not the shared filesystem
 SHARED_MOUNT = "/shared"
-CACHE_DIR = f"{SHARED_MOUNT}/cache-6.1"  # 4.5's caches are no use to 6.1
-BUILD_RUN = "_build"
+CACHE_ROOT = f"{SHARED_MOUNT}/cache-6.1"  # per Isaac version; 4.5's caches are no use to 6.1
+CONFIG_IN_JOB = "/workspace/config.json"
+MAX_INJECT_BYTES = 64 * 1024
+TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
+# What .env must define; see .env.example.
+REQUIRED_ENV = ("SDG_BUCKET", "SDG_S3_ENDPOINT", "SDG_S3_REGION", "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY", "SDG_REGISTRY", "SDG_SHARED_FS")
 
 
-def config_files() -> list[str]:
-    return sorted(p.relative_to(HERE).as_posix() for p in (HERE / "configs").glob("*.json"))
+# --- image -----------------------------------------------------------------
 
-
-def check_inject_size(paths: list[Path]) -> int:
-    """All of a job's injected files are encrypted together, and the total may
-    not exceed 64 KiB, so check the sum, not each file."""
-    total = sum(p.stat().st_size for p in paths)
-    if total > MAX_INJECT_BYTES:
-        raise ValueError(f"injected files total {total} bytes; a job allows {MAX_INJECT_BYTES}")
-    return total
-
-
-def code_hash() -> str:
-    """Content hash of everything that goes into the image. Configs are not
-    included, so changing one does not need a new image."""
-    h = hashlib.sha256()
-    for f in sorted(IMAGE_FILES):
-        h.update(f.encode() + b"\0" + (HERE / f).read_bytes() + b"\0")
-    return h.hexdigest()[:12]
+def image_files() -> list[Path]:
+    """Everything that goes into the image, which is also what its tag hashes."""
+    code = sorted(p for p in (ROOT / "sdg").rglob("*.py"))
+    return [ROOT / "Dockerfile", ROOT / ".dockerignore", *code]
 
 
 def image_tag(cfg: dict) -> str:
-    return f"{cfg['job']['registry'].rstrip('/')}/{IMAGE_NAME}:{code_hash()}"
+    h = hashlib.sha256()
+    for path in image_files():
+        h.update(path.relative_to(ROOT).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return f"{cfg['job']['registry'].rstrip('/')}/{IMAGE_NAME}:{h.hexdigest()[:12]}"
 
 
-def problems(cfg: dict) -> list[str]:
-    """Placeholders still unset, and tools the launch needs locally."""
-    out = []
-    job, up = cfg["job"], cfg["upload"]
-    for k in ("registry", "platform", "preset", "disk_size", "timeout", "secret", "shared_fs"):
-        if "<unset:" in str(job.get(k, "<unset:")):
-            out.append(f"job.{k} is unset ({job.get(k)})")
-    for k in ("bucket", "endpoint_url", "region"):
-        if "<unset:" in str(up[k]):
-            out.append(f"upload.{k} is unset ({up[k]})")
-    if not shutil.which("docker"):
-        out.append("docker is not on PATH (needed to build the job image)")
-    return out
+def build(config: str | Path, push: bool = True, dry_run: bool = False) -> str:
+    """Build the image and push it; return its tag. Both steps are quick when
+    nothing changed. The first push uploads the ~11 GB Isaac base layers."""
+    tag = image_tag(load_config(config))
+    steps = [["docker", "build", "--platform", "linux/amd64", "-t", tag, str(ROOT)]]
+    if push:
+        steps.append(["docker", "push", tag])
+    for cmd in steps:
+        print("==> " + shlex.join(cmd))
+        if not dry_run:
+            subprocess.run(cmd, check=True)
+    return tag
 
 
-def _job_spec(name: str, spec: dict, image: str, fs: str) -> list[str]:
+# --- job -------------------------------------------------------------------
+
+def create_command(cfg: dict, image: str, name: str, config_file: Path) -> list[str]:
+    """The `nebius ai job create` command for a resolved config."""
+    job = cfg["job"]
     cmd = [
         "nebius", "ai", "job", "create",
         "--name", name,
         "--image", image,
-        "--platform", spec["platform"],
-        "--preset", spec["preset"],
-        "--disk-size", spec["disk_size"],
-        "--timeout", spec["timeout"],
+        "--platform", job["platform"],
+        "--preset", job["preset"],
+        "--disk-size", job["disk_size"],
+        "--timeout", job["timeout"],
         "--restart-policy", "never",
-        "--volume", f"{fs}:{SHARED_MOUNT}:rw",
+        "--volume", f"{job['shared_fs']}:{SHARED_MOUNT}:rw",
+        "--inject-file", f"{config_file}:{CONFIG_IN_JOB}",
+        "--env", f"SDG_CACHE_ROOT={CACHE_ROOT}",
+        "--env", f"SDG_JOB_NAME={name}",
+        # The secret's payload entry named like the variable supplies its value.
+        "--env-secret", f"AWS_ACCESS_KEY_ID={job['secret']}",
+        "--env-secret", f"AWS_SECRET_ACCESS_KEY={job['secret']}",
+        # `=` so the CLI does not read `--config` as one of its own flags.
+        f"--args=--config {CONFIG_IN_JOB}",
+        "--async",
+        "--format", "jsonpath={.resource_id}",
     ]
-    if spec.get("subnet_id"):
-        cmd += ["--subnet-id", spec["subnet_id"]]
+    if job.get("subnet_id"):
+        cmd += ["--subnet-id", job["subnet_id"]]
     return cmd
 
 
-def build_command(config: str, image: str, name: str | None = None) -> list[str]:
-    cfg = load_config(config)
-    job, up = cfg["job"], cfg["upload"]
-    run_name = cfg["run_name"]
-    name = name or f"sdg-{run_name.replace('_', '-')}-{datetime.now():%Y%m%d-%H%M%S}"
-    entry_arg = "--probe" if cfg.get("probe") else Path(config).name
-
-    # The image's entrypoint is job_entry.sh, so the job only supplies its argument.
-    # `=` so the CLI cannot read `--probe` as one of its own flags.
-    cmd = _job_spec(name, job, image, job["shared_fs"]) + [f"--args={entry_arg}"]
-    configs = config_files()
-    check_inject_size([HERE / f for f in configs])
-    for f in configs:
-        cmd += ["--inject-file", f"{HERE / f}:{CONTAINER_ROOT}/{f}"]
-
-    env = {k: os.environ.get(k, f"<unset:{k}>") for k in FORWARD_ENV}
-    env["SDG_WORK_DIR"] = JOB_WORK_DIR
-    env["SDG_CACHE_ROOT"] = CACHE_DIR
-    env["SDG_CONFIG_DIR"] = f"{CONTAINER_ROOT}/configs"
-    env["SDG_JOB_NAME"] = name
-    for k, v in env.items():
-        cmd += ["--env", f"{k}={v}"]
-    # The value comes from the secret's payload entry whose key matches the
-    # variable name, so one secret holds both keys.
-    for k in (up["access_key_env"], up["secret_key_env"]):
-        cmd += ["--env-secret", f"{k}={job['secret']}"]
-    # Return once the job is submitted; `wait()` follows it from there.
-    return cmd + ["--async", "--format", "json"]
-
-
 def _show(cmd: list[str]) -> str:
-    """The command as you'd type it, with injected paths shortened for reading."""
-    return " \\\n  ".join(
-        shlex.quote(a.replace(str(HERE) + "/", "")) if a.startswith(str(HERE)) else shlex.quote(a)
-        for a in cmd)
+    """The command as you would type it, one flag and its value per line."""
+    lines, i = [shlex.join(cmd[:4])], 4
+    while i < len(cmd):
+        takes_value = "=" not in cmd[i] and i + 1 < len(cmd) and not cmd[i + 1].startswith("--")
+        lines.append(shlex.join(cmd[i:i + 1 + takes_value]))
+        i += 1 + takes_value
+    return " \\\n  ".join(lines)
 
 
-# --- job records --------------------------------------------------------------
-
-def _records() -> dict:
-    return json.loads(JOBS_FILE.read_text()) if JOBS_FILE.exists() else {}
-
-
-def _save_record(run_name: str, rec: dict) -> None:
-    JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    recs = _records()
-    runs = recs.setdefault(run_name, [])
-    for i, r in enumerate(runs):
-        if r["id"] == rec["id"]:
-            runs[i] = rec
-            break
-    else:
-        runs.append(rec)
-    JOBS_FILE.write_text(json.dumps(recs, indent=1))
-
-
-def last_job(run_name: str) -> dict:
-    """The most recent launch for a run, e.g. last_job("full_2500")["id"]."""
-    runs = _records().get(run_name)
-    if not runs:
-        raise KeyError(f"no recorded job for {run_name}; see {JOBS_FILE}")
-    return runs[-1]
-
-
-def _job_id(created: dict) -> str:
-    for path in (("metadata", "id"), ("resource_id",), ("id",)):
-        v = created
-        for k in path:
-            v = v.get(k) if isinstance(v, dict) else None
-        if v:
-            return v
-    raise RuntimeError(f"no job id in CLI output: {json.dumps(created)[:500]}")
-
-
-# --- build / init / launch / wait / logs ----------------------------------------
-
-def _create(cmd: list[str], run_name: str, record: dict) -> str:
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"nebius ai job create failed ({res.returncode}):\n{res.stderr.strip()}")
-    job_id = _job_id(json.loads(res.stdout))
-    name = cmd[cmd.index("--name") + 1]
-    _save_record(run_name, {"id": job_id, "name": name, "created": _now(),
-                            "timeline": {}, "state": "CREATED", **record})
-    print(f"==> created job {name} ({job_id})")
-    return job_id
-
-
-def build(config: str, push: bool = True, dry_run: bool = False) -> str:
-    """Build the job image and push it to the registry; return its tag. Both
-    steps are no-ops when nothing changed: Docker reuses its layer cache, and
-    the registry already has the layers. The first push uploads the ~11 GB base
-    layers once. Needs `nebius registry configure-helper` to have been run."""
-    cfg = load_config(config)
-    tag = image_tag(cfg)
-    steps = [["docker", "build", "--platform", "linux/amd64", "-t", tag, str(HERE)]]
-    if push:
-        steps.append(["docker", "push", tag])
-    for cmd in steps:
-        print("==> " + " ".join(shlex.quote(a) for a in cmd))
-        if not dry_run:
-            subprocess.run(cmd, check=True)
-    if push and not dry_run:
-        _save_record(BUILD_RUN, {"id": tag, "name": tag, "created": _now(), "timeline": {},
-                                 "state": "PUSHED", "bundle": code_hash()})
-    return tag
-
-
-def launch(config: str, dry_run: bool = False) -> str | None:
-    """Build and push the image if the code changed, then create the job and
-    return its ID. With dry_run, only print the commands."""
+def launch(config: str | Path, dry_run: bool = False) -> str | None:
+    """Build and push the image if the code changed, then create the job.
+    Returns the job ID, or None for a dry run."""
     cfg = load_config(config)
     print(f"==> {cfg['run_name']}: {cfg.get('description', '')}")
-    missing = problems(cfg) + [f"env {k} is not set" for k in FORWARD_ENV if not os.environ.get(k)]
-    for p in missing:
-        print(f"!! {p}")
-    if missing and not dry_run:
-        raise RuntimeError("fix the problems above before launching")
+    name = f"sdg-{cfg['run_name'].replace('_', '-')}-{datetime.now():%Y%m%d-%H%M%S}"
+    config_file = RUNS / "configs" / f"{name}.json"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(json.dumps(cfg, indent=1))
+    if config_file.stat().st_size > MAX_INJECT_BYTES:
+        raise ValueError(f"{config_file} is over the {MAX_INJECT_BYTES} byte limit for injected files")
+
     tag = build(config, dry_run=dry_run)
-    cmd = build_command(config, tag)
+    cmd = create_command(cfg, tag, name, config_file)
     print(_show(cmd))
     if dry_run:
         print("==> dry run; nothing launched")
         return None
-    return _create(cmd, cfg["run_name"], {"config": config, "image": tag})
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"nebius ai job create failed:\n{res.stderr.strip()}")
+    job_id = res.stdout.strip()
+    if not job_id.startswith("aijob-"):
+        raise RuntimeError(f"expected a job ID from the CLI, got: {res.stdout[:300]}")
+    _save_record(cfg["run_name"], {"id": job_id, "name": name, "created": _now(), "config": str(config),
+                                   "image": tag, "state": "CREATED", "timeline": {}})
+    print(f"==> created job {name} ({job_id})")
+    return job_id
 
 
 def state(job_id: str) -> str:
@@ -264,72 +159,131 @@ def state(job_id: str) -> str:
     return json.loads(res.stdout).get("status", {}).get("state", "UNKNOWN")
 
 
-def wait(job_id: str | None = None, run_name: str | None = None, poll_s: int = 15) -> dict:
-    """Poll until the job finishes, recording when each state was first seen.
-    Pass a job ID, or a run name to resume the last recorded launch."""
-    rec = last_job(run_name) if run_name else next(
-        (r for runs in _records().values() for r in runs if r["id"] == job_id), None)
-    job_id = job_id or rec["id"]
-    timeline = dict(rec["timeline"]) if rec else {}
+def wait(job_id: str, poll_s: int = 15) -> str:
+    """Poll until the job ends, printing each new state; return the last one."""
+    run_name, rec = _find_record(job_id)
     t0 = time.time()
     while True:
         s = state(job_id)
-        if s not in timeline:
-            timeline[s] = _now()
-            print(f"  {datetime.now():%H:%M:%S}  {s}  (+{time.time() - t0:.0f}s)", flush=True)
-            if rec:
-                rec.update(timeline=timeline, state=s)
-                _save_record(_run_of(job_id), rec)
-        if s in TERMINAL:
-            break
+        if s not in rec["timeline"]:
+            rec["timeline"][s] = _now()
+            rec["state"] = s
+            _save_record(run_name, rec)
+            print(f"  {datetime.now():%H:%M:%S}  {s}  (+{time.time() - t0:.0f} s)", flush=True)
+        if s in TERMINAL_STATES:
+            return s
         time.sleep(poll_s)
-    return {"id": job_id, "state": s, "timeline": timeline, "durations_s": durations(timeline)}
 
 
-def _run_of(job_id: str) -> str:
-    return next(run for run, recs in _records().items() if any(r["id"] == job_id for r in recs))
-
-
-def durations(timeline: dict) -> dict:
-    """Seconds spent in each state, from the first time each was seen. Only as
-    fine as the polling interval."""
-    seen = sorted(timeline.items(), key=lambda kv: kv[1])
-    ts = [datetime.fromisoformat(t) for _, t in seen]
-    return {s: (ts[i + 1] - ts[i]).total_seconds() for i, (s, _) in enumerate(seen[:-1])}
-
-
-def logs(job_id: str, tail: int | None = None, follow: bool = False, since: str = "72h") -> None:
-    # The CLI only looks back 1h by default, which hides older jobs' logs.
-    cmd = ["nebius", "ai", "job", "logs", job_id, "--since", since]
+def logs(job_id: str, tail: int | None = None, follow: bool = False) -> None:
+    # The CLI only looks back 1 h by default.
+    cmd = ["nebius", "ai", "job", "logs", job_id, "--since", "72h"]
     if tail:
         cmd += ["--tail", str(tail)]
     if follow:
-        cmd += ["--follow"]
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
-        for line in p.stdout:
-            print(line, end="", flush=True)
+        cmd.append("--follow")
+    subprocess.run(cmd, check=False)
+
+
+# --- job records -----------------------------------------------------------
+
+def _records() -> dict[str, list[dict]]:
+    return json.loads(JOBS_FILE.read_text()) if JOBS_FILE.exists() else {}
+
+
+def _save_record(run_name: str, rec: dict) -> None:
+    recs = _records()
+    runs = [r for r in recs.get(run_name, []) if r["id"] != rec["id"]]
+    recs[run_name] = runs + [rec]
+    JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    JOBS_FILE.write_text(json.dumps(recs, indent=1))
+
+
+def _find_record(job_id: str) -> tuple[str, dict]:
+    for run_name, runs in _records().items():
+        for rec in runs:
+            if rec["id"] == job_id:
+                return run_name, rec
+    raise KeyError(f"job {job_id} is not in {JOBS_FILE}")
+
+
+def last_job(run_name: str) -> dict:
+    """The most recent launch of a run, e.g. `last_job("probe")["name"]`."""
+    runs = _records().get(run_name)
+    if not runs:
+        raise KeyError(f"no recorded job for {run_name} in {JOBS_FILE}")
+    return runs[-1]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --- local checks ----------------------------------------------------------
+
+def check() -> bool:
+    """Is this machine ready to build, launch and read the bucket? Prints one
+    PASS/FAIL line per check. Secrets are checked by name only."""
+    results = []
+
+    def run_ok(cmd: list[str]) -> tuple[bool, str]:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode == 0, (r.stderr.strip().splitlines() or [""])[-1][:120]
+
+    cli = shutil.which("nebius")
+    results.append(("nebius CLI on PATH", bool(cli), cli or "see docs/NEBIUS_SETUP.md"))
+    if cli:
+        results.append(("CLI profile can list jobs", *run_ok(["nebius", "ai", "job", "list"])))
+    if shutil.which("docker"):
+        results.append(("docker daemon reachable", *run_ok(["docker", "info"])))
+    else:
+        results.append(("docker daemon reachable", False, "docker is not on PATH"))
+    for var in REQUIRED_ENV:
+        results.append((f"{var} set", bool(os.environ.get(var)), ""))
+    if os.environ.get("SDG_REGISTRY"):
+        host = os.environ["SDG_REGISTRY"].split("/")[0]
+        docker_cfg = Path.home() / ".docker" / "config.json"
+        helpers = json.loads(docker_cfg.read_text()).get("credHelpers", {}) if docker_cfg.exists() else {}
+        results.append(("docker can push to the registry", host in helpers,
+                        "" if host in helpers else "run: nebius registry configure-helper"))
+    if cli and os.environ.get("SDG_SHARED_FS"):
+        results.append(("shared filesystem exists", *run_ok(
+            ["nebius", "compute", "filesystem", "get", os.environ["SDG_SHARED_FS"]])))
+    if all(os.environ.get(v) for v in REQUIRED_ENV):
+        cfg = load_config(ROOT / "configs" / "common.json")
+        try:
+            storage.client(cfg).head_bucket(Bucket=cfg["upload"]["bucket"])
+            results.append(("bucket reachable with the .env keys", True, cfg["upload"]["bucket"]))
+        except Exception as e:  # noqa: BLE001
+            results.append(("bucket reachable with the .env keys", False, str(e)[:120]))
+    for name, ok, detail in results:
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f": {detail}" if detail else ""))
+    return all(ok for _, ok, _ in results)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--config", required=True)
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--config")
+    ap.add_argument("--check", action="store_true", help="check this machine is ready, then exit")
+    ap.add_argument("--build", action="store_true", help="only build and push the image")
     ap.add_argument("--dry-run", action="store_true", help="print the commands, run nothing")
     ap.add_argument("--wait", action="store_true", help="wait for the job, then print its logs")
-    ap.add_argument("--build", action="store_true", help="only build and push the job image")
     args = ap.parse_args()
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(HERE / ".env")
-    except ImportError:
-        pass
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+    if args.check:
+        return 0 if check() else 1
+    if not args.config:
+        ap.error("--config is required")
     if args.build:
         build(args.config, dry_run=args.dry_run)
         return 0
     job_id = launch(args.config, dry_run=args.dry_run)
     if job_id and args.wait:
-        result = wait(job_id)
+        final = wait(job_id)
         logs(job_id, tail=200)
-        return 0 if result["state"] == "COMPLETED" else 1
+        return 0 if final == "COMPLETED" else 1
     return 0
 
 
