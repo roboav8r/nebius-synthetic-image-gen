@@ -5,3 +5,9 @@ runs/
 .ipynb_checkpoints/
 __pycache__/
 .claude/settings.local.json
+
+# Local only: notes for a separate blog post, and Claude Code's project notes
+docs/LESSONS.md
+docs/blog/
+CLAUDE.md
+CLAUDE.local.md

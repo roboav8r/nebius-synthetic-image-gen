@@ -208,7 +208,7 @@ def _find_record(job_id: str) -> tuple[str, dict]:
 
 
 def last_job(run_name: str) -> dict:
-    """The most recent launch of a run, e.g. `last_job("probe")["name"]`."""
+    """The most recent launch of a run, e.g. `last_job("smoke_test")["name"]`."""
     runs = _records().get(run_name)
     if not runs:
         raise KeyError(f"no recorded job for {run_name} in {JOBS_FILE}")

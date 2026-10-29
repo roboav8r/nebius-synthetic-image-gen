@@ -1,12 +1,12 @@
 """Can this job render? Host checks, then the warehouse in each anti-aliasing mode.
 
-Run by `sdg.run` for a config with `"probe": true`. It checks the GPU's
+Run by `sdg.run` for a config with `"smoke_test": true`. It checks the GPU's
 graphics capability and Vulkan driver, the shared cache directory, network
 access to NVIDIA's assets and to our bucket, and then renders one view per
 anti-aliasing mode. It uploads those frames and `result.txt` to
-`<upload.prefix>/probe/<job name>/`, so the modes can be compared by eye.
+`<upload.prefix>/smoke_test/<job name>/`, so the modes can be compared by eye.
 
-The render runs in a child process (`python -m sdg.probe --render <dir>`):
+The render runs in a child process (`python -m sdg.smoke_test --render <dir>`):
 Kit ends its process on close, so everything after it has to live elsewhere.
 
 `edge` is the mean absolute difference between horizontally adjacent pixels.
@@ -69,7 +69,7 @@ def render(out_dir: Path) -> None:
         pngs = sorted(glob.glob(f"{frames_dir}/**/*.png", recursive=True))
         if pngs:
             shutil.copy(pngs[-1], out_dir / f"{mode}.png")
-        print(f"[probe] rendered {mode}: {len(pngs)} frame(s)", flush=True)
+        print(f"[smoke_test] rendered {mode}: {len(pngs)} frame(s)", flush=True)
     app.close()
 
 
@@ -93,8 +93,8 @@ def host_checks(cfg: dict) -> list[tuple[bool, str]]:
     if cache_root:
         try:
             Path(cache_root).mkdir(parents=True, exist_ok=True)
-            (Path(cache_root) / f".probe-{os.getpid()}").touch()
-            (Path(cache_root) / f".probe-{os.getpid()}").unlink()
+            (Path(cache_root) / f".smoke-test-{os.getpid()}").touch()
+            (Path(cache_root) / f".smoke-test-{os.getpid()}").unlink()
             checks.append((True, f"cache directory writable ({cache_root})"))
         except OSError as e:
             checks.append((False, f"cache directory writable ({cache_root}): {e}"))
@@ -120,13 +120,13 @@ def main(cfg: dict, work_dir: Path) -> int:
     if os.environ.get("SDG_CACHE_ROOT"):
         isaac.link_caches(Path(os.environ["SDG_CACHE_ROOT"]))
 
-    out_dir = work_dir / "probe"
+    out_dir = work_dir / "smoke_test"
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True)
     print("==> rendering each anti-aliasing mode (cold start about 6 min, warm about 1)", flush=True)
     log = out_dir / "render.log"
     with open(log, "w") as f:
-        subprocess.run(isaac.python() + ["-m", "sdg.probe", "--render", str(out_dir)],
+        subprocess.run(isaac.python() + ["-m", "sdg.smoke_test", "--render", str(out_dir)],
                        stdout=f, stderr=subprocess.STDOUT, cwd=ROOT, check=False)
     shutil.rmtree(out_dir / ".frames", ignore_errors=True)
 
@@ -145,7 +145,7 @@ def main(cfg: dict, work_dir: Path) -> int:
 
     report = [f"[{'PASS' if ok else 'FAIL'}] {name}" for ok, name in checks] + [""] + lines
     passed = all(ok for ok, _ in checks)
-    report.append("PROBE PASSED" if passed else "PROBE FAILED")
+    report.append("SMOKE TEST PASSED" if passed else "SMOKE TEST FAILED")
     (out_dir / "result.txt").write_text("\n".join(report) + "\n")
     print("\n".join(report), flush=True)
 

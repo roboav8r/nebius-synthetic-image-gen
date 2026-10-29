@@ -21,10 +21,12 @@ cp .env.example .env    # then follow docs/NEBIUS_SETUP.md
 Once the setup is complete, you can kick off jobs via the `nebius_synthetic_image_gen.ipynb` notebook, or the Python script:
 
 ```bash
-python nebius_job.py --check                                   # Verify the setup will work
-python nebius_job.py --config configs/probe.json --wait        # Can a job render?
-python nebius_job.py --config configs/naive_20.json --wait     # Perform a 20-frame run
+python nebius_job.py --check                                    # Verify the setup will work
+python nebius_job.py --config configs/smoke_test.json --wait    # Can a job render?
+python nebius_job.py --config configs/naive_20.json --wait      # Perform a 20-frame run
 ```
+
+Alternatively, you can [test the image locally](#testing-locally) before running the paid GPU serverless job.
 
 ## How a run works
 
@@ -45,17 +47,17 @@ The job's exit code says whether the run went as expected, so a job ending in FA
 | Path | What it is |
 |---|---|
 | `nebius_job.py` | Runs on your machine: local checks, image build, job launch, wait and logs. |
-| `nebius_synthetic_image_gen.ipynb` | The driver notebook: check, probe, run, audit. |
+| `nebius_synthetic_image_gen.ipynb` | The driver notebook: check, smoke test, run, audit. |
 | `configs/` | One JSON file per experiment. |
 | `sdg/` | Everything that runs in the job, copied whole into the image. |
 | `sdg/run.py` | The job's entrypoint. |
 | `sdg/generate.py` | The Replicator scene. Runs under Isaac Sim's own interpreter. |
 | `sdg/gate.py` | The quality gate, also runnable on its own: `python -m sdg.gate <run dir>`. |
-| `sdg/probe.py` | The probe job: host checks and a render per anti-aliasing mode. |
+| `sdg/smoke_test.py` | The smoke test job: host checks and a render per anti-aliasing mode. |
 | `sdg/config.py`, `sdg/storage.py` | Config loading, and the bucket. Shared by the job and your machine. |
 | `sdg/scene.py`, `sdg/isaac.py` | Shared constants (classes, colours, regimes), and Isaac's interpreter and caches. |
 | `tests/` | Tests that need neither Isaac nor the cloud: `pytest`. |
-| `docs/` | Setup, and the lessons learned along the way. |
+| `docs/` | The one-time Nebius setup. |
 | `runs/` | Gitignored: job records, resolved configs, downloaded runs. |
 
 ## Run configs
@@ -66,7 +68,7 @@ A config inherits from a parent (e.g. `"extends": "common.json"`), then override
 |---|---|
 | `run_name` | The run's name in the bucket and in `runs/`. |
 | `description` | Printed at launch. |
-| `probe` | `true` runs the probe instead of the generator. |
+| `smoke_test` | `true` runs the smoke test instead of the generator. |
 | `expect_gate` | `"pass"` (default) or `"fail"`. A run that is meant to fail the gate exits 0 when it does. |
 | `generator` | Passed to the generator: `num_frames`, `rt_subframes`, `seed`, `rtx_settings`, and any key in `DEFAULTS` in `sdg/generate.py`, such as the pool sizes `n_pallet` and `n_forklift`. |
 | `upload` | `enabled`, `bucket`, `endpoint_url`, `region`, `prefix`, and `overwrite`, which allows replacing a completed run. |
@@ -111,8 +113,6 @@ docker run --rm --gpus all -v $PWD/runs:/runs -e SDG_WORK_DIR=/runs/work sdg-loc
 - Compare rendering only against this container, not a local pip install of a different Isaac Sim version.
 
 ## Troubleshooting
-
-[`docs/LESSONS.md`](docs/LESSONS.md) lists every failure met so far, with its cause and fix. The most common:
 
 - **The job ends in ERROR without running.** The GPU platform is out of capacity. Nothing is billed; try again later.
 - **A CLI call hangs.** The Nebius login expired and is waiting for a browser sign-in. Run `nebius iam whoami`.

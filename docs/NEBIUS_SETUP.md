@@ -34,7 +34,7 @@ Note: Your user needs the `editor` role in the project (the default `editors` gr
 ## 2. Check GPU quota
 In the [console quotas page](https://console.nebius.com/quota), Compute section, check that the project can run at least one **L40s** or **RTX PRO 6000** GPU VM in the project's region (`compute.instance.gpu.l40s` or `compute.instance.gpu.rtx6000` > 0). Raise the quota if not.
 
-The jobs run Isaac Sim 6.1. NVIDIA tested 6.1 on Linux driver 595.58.03; Nebius's GPU workers report 580.173.02, so check `nvidia-smi` in the probe log if a new release misbehaves. Nebius's own [Isaac Sim example](https://github.com/nebius/serverless-ai-cookbook/tree/main/robotics/isaac-pick-place-sweep) runs 6.1 on that 580 driver.
+The jobs run Isaac Sim 6.1. NVIDIA tested 6.1 on Linux driver 595.58.03; Nebius's GPU workers report 580.173.02, so check `nvidia-smi` in the smoke test log if a new release misbehaves. Nebius's own [Isaac Sim example](https://github.com/nebius/serverless-ai-cookbook/tree/main/robotics/isaac-pick-place-sweep) runs 6.1 on that 580 driver.
 
 ## 3. Create the bucket
 Create it in the console (**Storage → Object Storage → Create resource → Bucket**) or with `nebius storage bucket create --name <bucket>`. On the bucket's page, note:
@@ -106,4 +106,4 @@ The launcher adds `--volume <id>:/shared:rw` and `SDG_CACHE_ROOT=/shared/cache-6
 If the project has more than one subnet, set `SDG_SUBNET_ID` in `.env`. Otherwise jobs use the default subnet.
 
 ## Done
-Open `nebius_synthetic_image_gen.ipynb`. Section 0 checks all of the above (the CLI, Docker and its registry login, `.env`, that the shared filesystem exists, and bucket access with your keys). Section 2 builds and pushes the image and runs the probe job, which checks the job side: GPU, Vulkan, the shared filesystem mount, network, the MysteryBox keys, and a render under four anti-aliasing modes. The probe uploads those frames to `s3://<bucket>/<upload.prefix>/probe/<job-name>/` for comparison. The first probe is a cold start of about 6 minutes. It also warms Isaac's caches on the shared filesystem, so later probes and runs start much faster.
+Open `nebius_synthetic_image_gen.ipynb`. Section 0 checks all of the above (the CLI, Docker and its registry login, `.env`, that the shared filesystem exists, and bucket access with your keys). Section 2 builds and pushes the image and runs the smoke test job, which checks the job side: GPU, Vulkan, the shared filesystem mount, network, the MysteryBox keys, and a render under four anti-aliasing modes. The smoke test uploads those frames to `s3://<bucket>/<upload.prefix>/smoke_test/<job-name>/` for comparison. The first smoke test is a cold start of about 6 minutes. It also warms Isaac's caches on the shared filesystem, so later smoke tests and runs start much faster.

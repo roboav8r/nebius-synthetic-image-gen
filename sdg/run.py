@@ -4,12 +4,12 @@
 
 Steps: refuse early if the run is already in the bucket, link Isaac's caches,
 generate, check the frame count, run the gate, upload. `_SUCCESS` is written
-last and is the only sign a run is complete. A config with `"probe": true`
-runs `sdg.probe` instead.
+last and is the only sign a run is complete. A config with `"smoke_test": true`
+runs `sdg.smoke_test` instead.
 
 Exit codes, so that a job ending in FAILED always means something went wrong:
     0  the gate's result was the one expected (`expect_gate`, default "pass")
-    1  the gate's result was not the one expected, or the probe failed
+    1  the gate's result was not the one expected, or the smoke test failed
     2  the generator wrote no frames (it aborts early on a failed scene check)
     3  the generator wrote fewer frames than asked for
     4  the upload was refused or failed
@@ -32,7 +32,7 @@ import sys
 import time
 from pathlib import Path
 
-from sdg import isaac, probe, storage
+from sdg import isaac, smoke_test, storage
 from sdg.config import load_config
 from sdg.gate import frames, regime_dirs, run_gate
 from sdg.scene import REGIMES
@@ -144,8 +144,8 @@ def main() -> int:
     cfg = load_config(ap.parse_args().config)
     work_dir = Path(os.environ.get("SDG_WORK_DIR", ROOT / "runs" / "work")).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.get("probe"):
-        return probe.main(cfg, work_dir)
+    if cfg.get("smoke_test"):
+        return smoke_test.main(cfg, work_dir)
     return run(cfg, work_dir)
 
 

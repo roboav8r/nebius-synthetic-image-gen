@@ -1,4 +1,4 @@
-"""Names and constants shared by the generator, the gate and the probe.
+"""Names and constants shared by the generator, the gate and the smoke test.
 
 Imports nothing, so it is safe to import under Isaac Sim's interpreter.
 """

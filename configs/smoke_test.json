@@ -1,6 +1,6 @@
 {
   "extends": "common.json",
-  "run_name": "probe",
+  "run_name": "smoke_test",
   "description": "No generator: checks GPU, Vulkan, caches, network and bucket from inside a job, then renders each anti-aliasing mode.",
-  "probe": true
+  "smoke_test": true
 }
