@@ -1,13 +1,13 @@
 # nebius-synthetic-image-gen
 
-Synthetic warehouse images of pallets, pallet trucks and forklifts, rendered with Isaac Sim Replicator as Nebius serverless GPU jobs. Each run is checked by a quality gate and uploaded to Nebius Object Storage, ready to audit locally in FiftyOne or any tool that reads KITTI labels.
+Synthetic warehouse images of pallets, pallet trucks and forklifts, rendered using Isaac Sim Replicator via Nebius serverless GPU jobs, then uploaded to Nebius Object Storage.
 
-Every frame is rendered from two camera regimes at once: an elevated, CCTV-style camera and a handheld camera at eye height. Rendering the same scene from both lets you separate the effect of viewpoint from the effect of the domain itself.
+To isolate the effect of camera perspective, every frame is rendered from two camera regimes at once: an elevated, CCTV-style camera (`elevated_fixed`) and a handheld camera at eye height (`ground_handheld`).
 
 ## Requirements
 
-- Linux with Docker and the NVIDIA container runtime, to build the job image. Developed on Ubuntu 24.04.
-- A Python environment manager. The commands below use mamba.
+- Linux with Docker and the NVIDIA container runtime. Specifically, this repo was developed on Ubuntu 24.04.
+- A Python environment manager. The commands below use `mamba`.
 - A Nebius AI Cloud project with GPU quota. [`docs/NEBIUS_SETUP.md`](docs/NEBIUS_SETUP.md) walks through the one-time setup: CLI, bucket, keys, secret, registry and shared filesystem.
 
 ## Quickstart
@@ -18,12 +18,12 @@ mamba env create -f environment.yml && mamba activate nebius-image-sdg
 cp .env.example .env    # then follow docs/NEBIUS_SETUP.md
 ```
 
-Then open `nebius_synthetic_image_gen.ipynb`, or use the command line:
+Once the setup is complete, you can kick off jobs via the `nebius_synthetic_image_gen.ipynb` notebook, or the Python script:
 
 ```bash
-python nebius_job.py --check                                   # is this machine ready?
-python nebius_job.py --config configs/probe.json --wait        # can a job render?
-python nebius_job.py --config configs/naive_20.json --wait     # a 20-frame run
+python nebius_job.py --check                                   # Verify the setup will work
+python nebius_job.py --config configs/probe.json --wait        # Can a job render?
+python nebius_job.py --config configs/naive_20.json --wait     # Perform a 20-frame run
 ```
 
 ## How a run works
@@ -60,7 +60,7 @@ The job's exit code says whether the run went as expected, so a job ending in FA
 
 ## Run configs
 
-A config names a parent with `"extends": "common.json"` and overrides only what differs; the two are deep-merged. Strings like `"${SDG_BUCKET}"` or `"${SDG_SUBNET_ID:-}"` are filled from the environment, so account details stay in `.env`. An unset variable without a default is an error.
+A config inherits from a parent (e.g. `"extends": "common.json"`), then overrides any differences. The parent and config are deep-merged. Account detail strings like `"${SDG_BUCKET}"` or `"${SDG_SUBNET_ID:-}"` stay in `.env`. Required & unset variables result in errors.
 
 | Key | Meaning |
 |---|---|
@@ -74,7 +74,7 @@ A config names a parent with `"extends": "common.json"` and overrides only what 
 
 ## What a run produces
 
-A run lands at `s3://<bucket>/<upload.prefix>/<run_name>/` with the same layout as on disk:
+A run lands at `s3://<bucket>/<upload.prefix>/<run_name>/` with the following layout:
 
 ```
 <run_name>/
@@ -92,11 +92,11 @@ A run lands at `s3://<bucket>/<upload.prefix>/<run_name>/` with the same layout 
     └── depth/<frame>.png
 ```
 
-In the KITTI label files only the class, the occlusion flag (column 3) and the 2D box (columns 5–8, in pixels) are measured. The writer fills the other columns with zeros. The segmentation masks use the class colours in `sdg/scene.py`.
+In the KITTI label files only the class, the occlusion flag (column 3) and the 2D box (columns 5–8, in pixels) are populated. The writer fills the other columns with zeros. The segmentation masks use the class colors in `sdg/scene.py`.
 
-## Testing locally before spending GPU time
+## Testing locally
 
-The real image runs locally with Docker. A cold Isaac start takes about 6 min.
+The real image runs locally with Docker. A cold Isaac start takes ~5 minutes on a modern gaming PC.
 
 ```bash
 docker build --platform linux/amd64 -t sdg-local:test .
@@ -109,17 +109,6 @@ docker run --rm --gpus all -v $PWD/runs:/runs -e SDG_WORK_DIR=/runs/work sdg-loc
 - To iterate on the code without rebuilding, add `-v $PWD/sdg:/opt/sdg/sdg:ro`.
 - For warm starts, mount host directories at `/isaac-sim/kit/cache`, `/root/.cache` and `/root/.nv`. Mount the whole `.cache` directory: mounting a subdirectory makes Docker create `.cache` as root-owned, and Warp then fails.
 - Compare rendering only against this container, not a local pip install of a different Isaac Sim version.
-
-## Verified run
-
-`naive_20` on 2026-10-26, on an RTX PRO 6000 Blackwell with driver 580.173.02:
-
-| | |
-|---|---|
-| Frames | 40 of 40 |
-| Startup, warm caches | 81 s |
-| Render | 9.5 s |
-| Gate | Labels pass in both regimes. Fails on density only, as expected for this config. |
 
 ## Troubleshooting
 

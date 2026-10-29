@@ -1,10 +1,10 @@
 # One-time Nebius setup
 
-You do this once per Nebius project. Afterwards, every run is launched from `nebius_synthetic_image_gen.ipynb`, or `python nebius_job.py --config ...`, on your machine.
+This will only need to be done once per Nebius project. Afterwards, every run is launched from the notebook (`nebius_synthetic_image_gen.ipynb`), or python script (`python nebius_job.py --config ...`), on your machine.
 
 ## 0. Create a Nebius AI Cloud account, tenant, and project
 
-At [Nebius' website](https://nebius.com/), create an account (if needed) and log in to the AI Cloud.
+At [Nebius' website](https://nebius.com/), create an account as needed and and log in to the AI Cloud.
 
 Then, at the [Nebius console](https://console.nebius.com):
 - Create a project in an appropriate region
@@ -14,9 +14,9 @@ Then, at the [Nebius console](https://console.nebius.com):
 ## 1. Install the CLI and create a profile
 Follow [Install the CLI](https://docs.nebius.com/cli/install), then:
 ```bash
-nebius profile create          # opens a browser to sign in; pick your project
-cat ~/.nebius/config.yaml      # confirm parent-id is your project ID
-nebius ai job list             # should print an empty list, not an error
+nebius profile create          # Create your profile; see blurb below for example values
+cat ~/.nebius/config.yaml      # Confirm parent-id is your project ID
+nebius ai job list             # Functions check; should print a list, not error out
 ```
 When prompted, I used these values in my profile:
 ```
@@ -37,7 +37,7 @@ In the [console quotas page](https://console.nebius.com/quota), Compute section,
 The jobs run Isaac Sim 6.1. NVIDIA tested 6.1 on Linux driver 595.58.03; Nebius's GPU workers report 580.173.02, so check `nvidia-smi` in the probe log if a new release misbehaves. Nebius's own [Isaac Sim example](https://github.com/nebius/serverless-ai-cookbook/tree/main/robotics/isaac-pick-place-sweep) runs 6.1 on that 580 driver.
 
 ## 3. Create the bucket
-Create it in the console (**Storage → Object Storage → Create bucket**) or with `nebius storage bucket create --name <bucket>`. On the bucket's page, note:
+Create it in the console (**Storage → Object Storage → Create resource → Bucket**) or with `nebius storage bucket create --name <bucket>`. On the bucket's page, note:
 - the **region**, such as `eu-north1` or `us-central1`
 - the **endpoint**, `https://storage.<region>.nebius.cloud`
 
@@ -61,7 +61,10 @@ cp .env.example .env    # .env is gitignored
 Fill in `SDG_BUCKET`, `SDG_S3_ENDPOINT` and `SDG_S3_REGION` from step 3, and `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from step 4. These are the names boto3 reads by itself. Leave `SDG_SECRET=sdg-s3` unless you name the secret differently in step 6.
 
 ## 6. Store the keys in MysteryBox for the jobs
-Jobs can't read your `.env`. They get the keys from a MysteryBox (SecretStash) secret, referenced by name with `--env-secret`. Create one secret with both keys as payload entries. The entry keys must equal the variable names. This reads the values from `.env` without printing them:
+Since Nebius jobs can't read your `.env`, they musty get service account keys from a MysteryBox (SecretStash) secret, referenced by name with `--env-secret`. 
+
+### Creating keys (initial)
+The code snippet below will read the values from `.env` (without printing them), then create a MysteryBox secret with both keys as payload entries:
 ```bash
 set -a; source .env; set +a
 nebius mysterybox secret create --name "${SDG_SECRET}" --secret-version-payload "$(python3 -c '
@@ -69,6 +72,8 @@ import json, os
 print(json.dumps([{"key": k, "string_value": os.environ[k]}
                   for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")]))')"
 ```
+
+### Modifying keys (recurring)
 See [creating secrets](https://docs.nebius.com/mysterybox/secrets/create). To rotate the key, or rename its entries, add a new version to the same secret; jobs read the primary version:
 ```bash
 SECRET_ID=$(nebius mysterybox secret get-by-name --name "${SDG_SECRET}" --format 'jsonpath={.metadata.id}')
@@ -79,7 +84,7 @@ print(json.dumps([{"key": k, "string_value": os.environ[k]}
 ```
 
 ## 7. Create a Container Registry for the job image
-The jobs run our own image: NVIDIA's Isaac Sim 6.1 image with this repo's code copied in (see `Dockerfile`). It is built locally with Docker and pushed to a [Container Registry](https://docs.nebius.com/container-registry/quickstart) in your project. The registry is free; you pay only for the storage.
+The jobs run an NVIDIA's Isaac Sim 6.1 image with this repo's code copied in (see `Dockerfile`). It is built locally with Docker and pushed to a [Container Registry](https://docs.nebius.com/container-registry/quickstart) in the project.
 1. Install Docker with the NVIDIA container runtime (needed only to build the image, and to test it locally).
 2. Create the registry in the **same region** as the jobs:
    ```bash
@@ -88,14 +93,8 @@ The jobs run our own image: NVIDIA's Isaac Sim 6.1 image with this repo's code c
    ```
 3. Put the registry path from its console page, `cr.<region>.nebius.cloud/<registry-id>`, in `SDG_REGISTRY` in `.env`.
 
-### How code and config reach the job
-All of a job's `--inject-file` contents share a 64 KiB limit, and the code is larger than that, so it goes into the image:
-1. `nj.build()` tags the image with a hash of the `sdg/` package, the Dockerfile and `.dockerignore`, then runs `docker build` and `docker push`. Both are quick when nothing changed. The first push uploads the ~11 GB Isaac base layers once.
-2. `nj.launch()` calls `nj.build()` itself, so a code change is picked up automatically.
-3. The launcher resolves the run config on your machine, filling in `.env`, and injects that one file at `/workspace/config.json`. Editing a config does not need a new image.
-
 ## 8. Create the shared filesystem for Isaac's caches
-Every job mounts one shared filesystem at `/shared`, which holds Isaac Sim's caches at `/shared/cache-6.1/`. Each job starts on a fresh VM, so without these, Isaac starts cold every time: shader compilation and asset downloads take roughly 5–6 min. Locally, the same caches took startup from 336 s to 19.5 s.
+Every job mounts one shared filesystem at `/shared`, which holds Isaac Sim's caches at `/shared/cache-6.1/`. Each job starts on a fresh VM, so without these, Isaac starts cold every time: shader compilation and asset downloads take roughly 5–6 min. Locally, caching reduced startup from ~5 minutes to ~20 seconds.
 
 To set it up:
 1. Create a filesystem (**Compute → Shared filesystems**, about 50 GiB is plenty) in the **same region** as the jobs, or with `nebius compute filesystem create --name sdg-shared --type network_ssd --size-gibibytes 50`.
