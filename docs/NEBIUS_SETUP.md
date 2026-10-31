@@ -61,7 +61,7 @@ cp .env.example .env    # .env is gitignored
 Fill in `SDG_BUCKET`, `SDG_S3_ENDPOINT` and `SDG_S3_REGION` from step 3, and `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from step 4. These are the names boto3 reads by itself. Leave `SDG_SECRET=sdg-s3` unless you name the secret differently in step 6.
 
 ## 6. Store the keys in MysteryBox for the jobs
-Since Nebius jobs can't read your `.env`, they musty get service account keys from a MysteryBox (SecretStash) secret, referenced by name with `--env-secret`. 
+Since Nebius jobs can't read your `.env`, they must get service account keys from a MysteryBox (SecretStash) secret, referenced by name with `--env-secret`. The launcher looks up the entries `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, so the entries must have exactly those names. A secret with other entry names still lets the job start, but the bucket then refuses it with 403.
 
 ### Creating keys (initial)
 The code snippet below will read the values from `.env` (without printing them), then create a MysteryBox secret with both keys as payload entries:
@@ -76,6 +76,7 @@ print(json.dumps([{"key": k, "string_value": os.environ[k]}
 ### Modifying keys (recurring)
 See [creating secrets](https://docs.nebius.com/mysterybox/secrets/create). To rotate the key, or rename its entries, add a new version to the same secret; jobs read the primary version:
 ```bash
+set -a; source .env; set +a
 SECRET_ID=$(nebius mysterybox secret get-by-name --name "${SDG_SECRET}" --format 'jsonpath={.metadata.id}')
 nebius mysterybox secret-version create --parent-id "${SECRET_ID}" --set-primary --payload "$(python3 -c '
 import json, os

@@ -104,6 +104,10 @@ def host_checks(cfg: dict) -> list[tuple[bool, str]]:
         checks.append((status == 200, f"HTTPS to NVIDIA's asset bucket: HTTP {status}"))
     except OSError as e:
         checks.append((False, f"HTTPS to NVIDIA's asset bucket: {e}"))
+    # A secret without these entry names still starts the job; the bucket then just says 403.
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        checks.append((bool(os.environ.get(key)),
+                       f"{key} received from the MysteryBox secret (the entry must have this name)"))
     try:
         storage.client(cfg).head_bucket(Bucket=cfg["upload"]["bucket"])
         checks.append((True, f"bucket {cfg['upload']['bucket']} reachable"))
