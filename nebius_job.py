@@ -153,10 +153,21 @@ def launch(config: str | Path, dry_run: bool = False) -> str | None:
     return job_id
 
 
-def state(job_id: str) -> str:
-    res = subprocess.run(["nebius", "ai", "job", "get", job_id, "--format", "json"],
-                         capture_output=True, text=True, check=True)
-    return json.loads(res.stdout).get("status", {}).get("state", "UNKNOWN")
+def state(job_id: str, attempts: int = 5) -> str:
+    # The CLI fails now and then (exit 7 mid-provisioning once); one miss must not end a wait.
+    for i in range(attempts):
+        res = subprocess.run(["nebius", "ai", "job", "get", job_id, "--format", "json"],
+                             capture_output=True, text=True)
+        try:
+            if res.returncode == 0:
+                return json.loads(res.stdout).get("status", {}).get("state", "UNKNOWN")
+        except json.JSONDecodeError:
+            pass
+        if i < attempts - 1:
+            print(f"  (job get failed, exit {res.returncode}: {res.stderr.strip()[:200]}; retrying)", flush=True)
+            time.sleep(10 * (i + 1))
+    raise RuntimeError(f"nebius ai job get {job_id} failed {attempts} times; last exit {res.returncode}: "
+                       f"{res.stderr.strip()}")
 
 
 def wait(job_id: str, poll_s: int = 15) -> str:
